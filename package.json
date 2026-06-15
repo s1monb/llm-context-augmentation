@@ -1,0 +1,32 @@
+{
+  "name": "llm-knowledge-injection-demos",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Six runnable demos of different ways to add knowledge to an LLM post-training.",
+  "scripts": {
+    "1:context": "tsx 1-context-stuffing/index.ts",
+    "2:memory": "tsx 2-persistent-memory/index.ts",
+    "3:agentic": "tsx 3-agentic-memory/index.ts",
+    "4:rag": "tsx 4-rag/index.ts",
+    "5:graphrag": "tsx 5-graphrag/index.ts",
+    "5:browser": "tsx 5-graphrag/browser.ts",
+    "5:down": "docker compose -f 5-graphrag/docker-compose.yml down",
+    "6:mcp": "tsx 6-mcp/client.ts",
+    "7:rag-mcp": "tsx 7-rag-mcp/index.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "latest",
+    "@huggingface/transformers": "latest",
+    "@modelcontextprotocol/sdk": "latest",
+    "@qdrant/js-client-rest": "latest",
+    "dotenv": "latest",
+    "neo4j-driver": "latest",
+    "zod": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
