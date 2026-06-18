@@ -4,13 +4,10 @@ import { fileURLToPath } from "node:url";
 import Anthropic from "@anthropic-ai/sdk";
 import { client, MODEL } from "../shared/claude";
 import { QUESTION } from "../shared/knowledge";
+import { c, step, note, pause } from "../shared/ui";
 
 /**
  * Variant 3 — Agentic retrieval over persistent memory.
- *
- * Same markdown store as variant 2, but instead of dumping everything into the
- * prompt, the model is given tools to *navigate* the memory: list the files,
- * then read only the ones it judges relevant. The agent drives retrieval.
  */
 const here = path.dirname(fileURLToPath(import.meta.url));
 // Reuse variant 2's memory tree — same store, different access pattern.
@@ -62,10 +59,32 @@ async function runTool(name: string, input: any): Promise<string> {
   return `Unknown tool: ${name}`;
 }
 
-async function main() {
-  console.log(`Q: ${QUESTION}\n`);
+/** One-line dimmed preview of a tool result, so the loop output stays readable. */
+function preview(text: string): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > 120 ? `${flat.slice(0, 120)}…` : flat;
+}
 
+async function main() {
+  console.log(`${c.bold}Variant 3 — Agentic memory${c.reset}`);
+  note("Give the model tools to navigate memory; it reads only what it needs.");
+  console.log(`\n${c.magenta}Q:${c.reset} ${QUESTION}`);
+
+  // ⏸ Pause before introducing the tools.
+  await pause("Press Enter to hand the model its memory tools…");
+
+  // STEP 1 — Give the model navigation tools instead of the whole store.
+  step("Hand the model tools to navigate memory");
+  note("No store is stuffed in — the model gets two tools and must choose:");
+  for (const t of tools) console.log(`  ${c.green}•${c.reset} ${t.name} — ${c.dim}${t.description}${c.reset}`);
+
+  // ⏸ Pause before kicking off the loop.
+  await pause("Press Enter to start the agentic retrieval loop…");
+
+  // STEP 2 — Agentic loop. The model lists, then reads only what it needs.
+  step("Agentic retrieval loop — the model drives");
   const messages: Anthropic.MessageParam[] = [{ role: "user", content: QUESTION }];
+  let round = 0;
 
   while (true) {
     const res = await client.messages.create({
@@ -78,26 +97,37 @@ async function main() {
     });
     messages.push({ role: "assistant", content: res.content });
 
+    // Show any reasoning the model emitted alongside its tool calls.
+    const text = res.content
+      .filter((b): b is Anthropic.TextBlock => b.type === "text")
+      .map((b) => b.text)
+      .join("\n")
+      .trim();
+    if (text) console.log(`${c.dim}model: ${text}${c.reset}`);
+
+    // No more tools requested → the model is ready to answer.
     if (res.stop_reason !== "tool_use") {
-      console.log("--- Answer ---");
-      console.log(
-        res.content
-          .filter((b): b is Anthropic.TextBlock => b.type === "text")
-          .map((b) => b.text)
-          .join("\n"),
-      );
+      await pause("Press Enter to reveal the final answer…");
+      step("The model answers from what it chose to read");
+      console.log(`${c.green}${c.bold}Answer:${c.reset} ${text}`);
       break;
     }
 
+    // Surface what the model wants to call this round, then gate execution.
+    round++;
+    const calls = res.content.filter(
+      (b): b is Anthropic.ToolUseBlock => b.type === "tool_use",
+    );
+    for (const call of calls) {
+      console.log(`${c.yellow}↳ round ${round}:${c.reset} ${call.name}(${JSON.stringify(call.input)})`);
+    }
+    await pause(`Press Enter to run round ${round}'s tool call(s)…`);
+
     const results: Anthropic.ToolResultBlockParam[] = [];
-    for (const block of res.content) {
-      if (block.type !== "tool_use") continue;
-      console.log(`[tool] ${block.name}(${JSON.stringify(block.input)})`);
-      results.push({
-        type: "tool_result",
-        tool_use_id: block.id,
-        content: await runTool(block.name, block.input),
-      });
+    for (const call of calls) {
+      const out = await runTool(call.name, call.input);
+      console.log(`  ${c.green}✓${c.reset} ${c.dim}${preview(out)}${c.reset}`);
+      results.push({ type: "tool_result", tool_use_id: call.id, content: out });
     }
     messages.push({ role: "user", content: results });
   }

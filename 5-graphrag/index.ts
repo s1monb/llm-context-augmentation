@@ -2,16 +2,10 @@ import "dotenv/config";
 import neo4j from "neo4j-driver";
 import { ask } from "../shared/claude";
 import { QUESTION } from "../shared/knowledge";
+import { c, step, note, pause } from "../shared/ui";
 
 /**
  * Variant 6 — GraphRAG (graph retrieval).
- *
- * Knowledge is a graph of entities (systems, teams, people, policies) and the
- * relationships between them. Retrieval = match the entities the question names,
- * then *traverse* outward to pull in connected context. This is what makes it
- * shine here: the question only names "system-a", but the answer (who leads the
- * owning team) is two hops away — system-a → Team Aurora → Maya Chen. Vector
- * similarity wouldn't reliably make that jump; graph traversal does it by design.
  */
 const URL = process.env.NEO4J_URL ?? "bolt://localhost:7687";
 const PASSWORD = process.env.NEO4J_PASSWORD ?? "testpassword";
@@ -69,7 +63,9 @@ function nodeStr(name: string, label: string, props: Record<string, unknown>): s
 }
 
 async function main() {
-  console.log(`Q: ${QUESTION}\n`);
+  console.log(`${c.bold}Variant 6 — GraphRAG (graph retrieval)${c.reset}`);
+  note("Match entities in the question, then traverse the graph to pull in context.");
+  console.log(`\n${c.magenta}Q:${c.reset} ${QUESTION}`);
 
   // disableLosslessIntegers → ports come back as plain JS numbers, not {low,high}.
   const driver = neo4j.driver(URL, neo4j.auth.basic("neo4j", PASSWORD), {
@@ -78,18 +74,33 @@ async function main() {
   const session = driver.session();
 
   try {
-    // 1. Build the graph fresh.
+    // ⏸ Pause before building the graph.
+    await pause("Press Enter to build the knowledge graph in Neo4j…");
+
+    // STEP 1 — Build the graph fresh.
+    step("Build the knowledge graph in Neo4j");
     await session.run("MATCH (n) DETACH DELETE n");
     await session.run(SEED_GRAPH);
+    note("Created the Helix graph: systems, teams, people, and policy — with edges (OWNS, LEADS, MEMBER_OF, GOVERNED_BY).");
 
-    // 2. Entity-link the question against node names.
+    // ⏸ Pause before entity linking.
+    await pause("Press Enter to entity-link the question…");
+
+    // STEP 2 — Entity-link the question against node names.
+    step("Entity-link the question → seed nodes");
     const allNames = (await session.run("MATCH (n) RETURN n.name AS name")).records.map(
       (r) => r.get("name") as string,
     );
     const seeds = matchSeeds(QUESTION, allNames);
-    console.log(`Matched seed entities: ${seeds.join(", ") || "(none)"}\n`);
+    note(`Distinctive words in the question matched these nodes:`);
+    console.log(`  ${c.green}${seeds.join(", ") || "(none)"}${c.reset}`);
 
-    // 3. Traverse up to 2 hops from each seed and collect the directed edges.
+    // ⏸ Pause before traversal.
+    await pause("Press Enter to traverse the graph from the seeds…");
+
+    // STEP 3 — Traverse up to 2 hops from each seed and collect the directed edges.
+    step("Traverse 1–2 hops → subgraph");
+    note("The answer is two hops out: system-a → Team Aurora → Maya Chen.");
     const result = await session.run(
       `MATCH path = (seed)-[*1..2]-(x)
        WHERE seed.name IN $seeds
@@ -109,17 +120,28 @@ async function main() {
     }
 
     const context = [...edges].join("\n");
-    console.log("--- Retrieved subgraph (2-hop edges) ---");
-    console.log(context + "\n");
+    console.log(`\n${c.dim}--- retrieved subgraph (${edges.size} edges) ---${c.reset}`);
+    console.log(`${c.dim}${context}${c.reset}`);
 
-    // 4. Answer from the subgraph.
+    // ⏸ Pause before building the prompt.
+    await pause("Press Enter to append the triples to the prompt…");
+
+    // STEP 4 — Assemble the prompt from the subgraph.
+    step("Append the subgraph triples to the prompt");
+    const prompt = `Knowledge-graph context:\n\n${context}\n\n---\nQuestion: ${QUESTION}`;
+    console.log(`${c.dim}${prompt}${c.reset}`);
+
+    // ⏸ Pause before the call.
+    await pause("Press Enter to send the prompt to the model…");
+
+    // STEP 5 — Answer from the subgraph.
+    step("Single LLM call with the subgraph context");
     const answer = await ask({
       system:
         "Answer using ONLY the knowledge-graph triples below (entities matched to the question, expanded up to two hops).",
-      prompt: `Knowledge-graph context:\n\n${context}\n\n---\nQuestion: ${QUESTION}`,
+      prompt,
     });
-    console.log("--- Answer ---");
-    console.log(answer);
+    console.log(`${c.green}${c.bold}Answer:${c.reset} ${answer}`);
   } finally {
     await session.close();
     await driver.close();

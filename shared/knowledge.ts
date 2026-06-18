@@ -41,7 +41,7 @@ export const CORPUS: Doc[] = [
   },
   {
     id: "rate-limit",
-    title: "Helix public API rate limit",
+    title: "Helix public API",
     text: "The Helix public API is limited to 7 requests per second per API key. Bursts above this return HTTP 429.",
   },
 ];

@@ -7,32 +7,34 @@ import Anthropic from "@anthropic-ai/sdk";
 import { embed, EMBED_DIM } from "../shared/embeddings";
 import { client as anthropic, MODEL } from "../shared/claude";
 import { CORPUS, DOC_QUESTION } from "../shared/knowledge";
+import { c, step, note, pause } from "../shared/ui";
 
 /**
  * Variant 7 — RAG + MCP.
- *
- * Combines the two: RAG holds cheap summaries plus a *pointer* to a deeper doc
- * (the `doc` field, stored in the Qdrant payload), and MCP serves those docs on
- * demand. The flow:
- *
- *   1. Retrieve summaries by similarity (RAG) — these reference docs by filename.
- *   2. Hand the agent a `read_doc` tool (MCP).
- *   3. The summary alone can't answer DOC_QUESTION, so the agent follows the
- *      pointer and fetches the runbook — only then is the heavy content loaded.
- *
- * This is the common production shape: index is small and semantic; the bulky
- * source of truth is fetched lazily, only for the docs that turned out relevant.
  */
 const here = path.dirname(fileURLToPath(import.meta.url));
 const COLLECTION = "helix-docs";
 
-async function main() {
-  console.log(`Q: ${DOC_QUESTION}\n`);
+/** One-line dimmed preview of a tool result, so the loop output stays readable. */
+function preview(text: string): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > 120 ? `${flat.slice(0, 120)}…` : flat;
+}
 
-  // --- RAG: index the summaries (with doc pointers) and retrieve ---
+async function main() {
+  console.log(`${c.bold}Variant 7 — RAG + MCP${c.reset}`);
+  note("RAG holds summaries with doc pointers; MCP fetches the heavy doc on demand.");
+  console.log(`\n${c.magenta}Q:${c.reset} ${DOC_QUESTION}`);
+
   const qdrant = new QdrantClient({
     url: process.env.QDRANT_URL ?? "http://localhost:6333",
   });
+
+  // ⏸ Pause before indexing.
+  await pause("Press Enter to index the summaries (with doc pointers)…");
+
+  // STEP 1 — RAG: index the summaries, each carrying a pointer to a deeper doc.
+  step("RAG — index the summaries (with doc pointers)");
   await qdrant.deleteCollection(COLLECTION).catch(() => {});
   await qdrant.createCollection(COLLECTION, {
     vectors: { size: EMBED_DIM, distance: "Cosine" },
@@ -47,20 +49,23 @@ async function main() {
       payload: { title: d.title, text: d.text, doc: d.doc ?? null },
     })),
   });
+  note(`Indexed ${CORPUS.length} summaries; some carry a pointer to a deeper runbook.`);
 
+  // ⏸ Pause before retrieval.
+  await pause("Press Enter to retrieve the summaries by similarity…");
+
+  // STEP 2 — RAG: retrieve the most similar summaries.
+  step("RAG — retrieve summaries by similarity");
   const [queryVector] = await embed([DOC_QUESTION]);
   const hits = await qdrant.search(COLLECTION, {
     vector: queryVector,
     limit: 3,
     with_payload: true,
   });
-  console.log(
-    "RAG retrieved: " +
-      hits
-        .map((h) => `${h.payload?.title}${h.payload?.doc ? ` → ${h.payload.doc}` : ""}`)
-        .join(", ") +
-      "\n",
-  );
+  for (const h of hits) {
+    const ref = h.payload?.doc ? ` ${c.yellow}→ ${h.payload.doc}${c.reset}` : "";
+    console.log(`  ${c.green}•${c.reset} ${h.payload?.title} ${c.dim}(${h.score.toFixed(3)})${c.reset}${ref}`);
+  }
 
   const passages = hits
     .map((h) => {
@@ -71,7 +76,11 @@ async function main() {
     })
     .join("\n\n");
 
-  // --- MCP: connect to the docs server that can serve those referenced docs ---
+  // ⏸ Pause before wiring up MCP.
+  await pause("Press Enter to connect the docs server over MCP…");
+
+  // STEP 3 — MCP: connect the docs server that can serve those referenced docs.
+  step("MCP — connect the docs server and discover its tools");
   const transport = new StdioClientTransport({
     command: "npx",
     args: ["tsx", path.join(here, "docs-server.ts")],
@@ -84,14 +93,22 @@ async function main() {
     description: t.description ?? "",
     input_schema: t.inputSchema as Anthropic.Tool.InputSchema,
   }));
+  note("Tools advertised by the docs server:");
+  for (const t of tools) console.log(`  ${c.green}•${c.reset} ${t.name} — ${c.dim}${t.description}${c.reset}`);
 
-  // --- Agentic loop: RAG context in the prompt, MCP tool to follow the pointer ---
+  // ⏸ Pause before the loop.
+  await pause("Press Enter to start the agent loop…");
+
+  // STEP 4 — Agentic loop: RAG context in the prompt, MCP tool to follow the pointer.
+  step("Agent loop — RAG context in, MCP tool to follow the pointer");
+  note("The summary alone can't answer this, so the agent should call read_doc.");
   const messages: Anthropic.MessageParam[] = [
     {
       role: "user",
       content: `Retrieved knowledge (summaries; some reference deeper technical docs by filename):\n\n${passages}\n\n---\nQuestion: ${DOC_QUESTION}`,
     },
   ];
+  let round = 0;
 
   while (true) {
     const res = await anthropic.messages.create({
@@ -104,30 +121,41 @@ async function main() {
     });
     messages.push({ role: "assistant", content: res.content });
 
+    const text = res.content
+      .filter((b): b is Anthropic.TextBlock => b.type === "text")
+      .map((b) => b.text)
+      .join("\n")
+      .trim();
+    if (text) console.log(`${c.dim}model: ${text}${c.reset}`);
+
     if (res.stop_reason !== "tool_use") {
-      console.log("--- Answer ---");
-      console.log(
-        res.content
-          .filter((b): b is Anthropic.TextBlock => b.type === "text")
-          .map((b) => b.text)
-          .join("\n"),
-      );
+      await pause("Press Enter to reveal the final answer…");
+      step("The model answers from the fetched runbook");
+      console.log(`${c.green}${c.bold}Answer:${c.reset} ${text}`);
       break;
     }
 
+    round++;
+    const calls = res.content.filter(
+      (b): b is Anthropic.ToolUseBlock => b.type === "tool_use",
+    );
+    for (const call of calls) {
+      console.log(`${c.yellow}↳ round ${round}:${c.reset} ${call.name}(${JSON.stringify(call.input)})`);
+    }
+    await pause(`Press Enter to run round ${round}'s MCP call(s)…`);
+
     const results: Anthropic.ToolResultBlockParam[] = [];
-    for (const block of res.content) {
-      if (block.type !== "tool_use") continue;
-      console.log(`[mcp call] ${block.name}(${JSON.stringify(block.input)})`);
+    for (const call of calls) {
       const r = await mcp.callTool({
-        name: block.name,
-        arguments: block.input as Record<string, unknown>,
+        name: call.name,
+        arguments: call.input as Record<string, unknown>,
       });
-      const text = (r.content as { type: string; text?: string }[])
-        .filter((c) => c.type === "text")
-        .map((c) => c.text)
+      const out = (r.content as { type: string; text?: string }[])
+        .filter((cc) => cc.type === "text")
+        .map((cc) => cc.text)
         .join("\n");
-      results.push({ type: "tool_result", tool_use_id: block.id, content: text });
+      console.log(`  ${c.green}✓${c.reset} ${c.dim}${preview(out)}${c.reset}`);
+      results.push({ type: "tool_result", tool_use_id: call.id, content: out });
     }
     messages.push({ role: "user", content: results });
   }

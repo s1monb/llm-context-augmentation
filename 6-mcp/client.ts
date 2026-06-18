@@ -5,22 +5,29 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import Anthropic from "@anthropic-ai/sdk";
 import { client as anthropic, MODEL } from "../shared/claude";
 import { QUESTION } from "../shared/knowledge";
+import { c, step, note, pause } from "../shared/ui";
 
 /**
  * Variant 4 — MCP.
- *
- * MCP is a *protocol*, not a knowledge technique in itself: it's a standard way
- * to connect a model to tools and data. Here we spawn the local stdio MCP
- * server (server.ts), discover whatever tools it advertises, hand those tools
- * to Claude verbatim, and run a normal tool-use loop. Swapping the server for a
- * different one (GitHub, a database, the filesystem) needs zero client changes.
  */
 const here = path.dirname(fileURLToPath(import.meta.url));
 
-async function main() {
-  console.log(`Q: ${QUESTION}\n`);
+/** One-line dimmed preview of a tool result, so the loop output stays readable. */
+function preview(text: string): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > 120 ? `${flat.slice(0, 120)}…` : flat;
+}
 
-  // 1. Spawn and connect to the MCP server over stdio.
+async function main() {
+  console.log(`${c.bold}Variant 4 — MCP${c.reset}`);
+  note("Spawn an MCP server, discover its tools, run a normal tool-use loop.");
+  console.log(`\n${c.magenta}Q:${c.reset} ${QUESTION}`);
+
+  // ⏸ Pause before spawning the server.
+  await pause("Press Enter to spawn the MCP server and discover its tools…");
+
+  // STEP 1 — Spawn and connect to the MCP server over stdio, then discover tools.
+  step("Spawn the MCP server and discover its tools");
   const transport = new StdioClientTransport({
     command: "npx",
     args: ["tsx", path.join(here, "server.ts")],
@@ -28,17 +35,23 @@ async function main() {
   const mcp = new Client({ name: "helix-client", version: "1.0.0" });
   await mcp.connect(transport);
 
-  // 2. Discover the server's tools and translate them to Anthropic tool specs.
   const { tools: mcpTools } = await mcp.listTools();
   const tools: Anthropic.Tool[] = mcpTools.map((t) => ({
     name: t.name,
     description: t.description ?? "",
     input_schema: t.inputSchema as Anthropic.Tool.InputSchema,
   }));
-  console.log(`Discovered MCP tools: ${tools.map((t) => t.name).join(", ")}\n`);
+  note("Tools advertised by the server (handed to Claude verbatim):");
+  for (const t of tools) console.log(`  ${c.green}•${c.reset} ${t.name} — ${c.dim}${t.description}${c.reset}`);
 
-  // 3. Standard tool-use loop — but every tool call is routed to the MCP server.
+  // ⏸ Pause before the loop.
+  await pause("Press Enter to start the tool-use loop…");
+
+  // STEP 2 — Standard tool-use loop — but every tool call is routed to MCP.
+  step("Tool-use loop — calls routed to the MCP server");
   const messages: Anthropic.MessageParam[] = [{ role: "user", content: QUESTION }];
+  let round = 0;
+
   while (true) {
     const res = await anthropic.messages.create({
       model: MODEL,
@@ -49,30 +62,41 @@ async function main() {
     });
     messages.push({ role: "assistant", content: res.content });
 
+    const text = res.content
+      .filter((b): b is Anthropic.TextBlock => b.type === "text")
+      .map((b) => b.text)
+      .join("\n")
+      .trim();
+    if (text) console.log(`${c.dim}model: ${text}${c.reset}`);
+
     if (res.stop_reason !== "tool_use") {
-      console.log("--- Answer ---");
-      console.log(
-        res.content
-          .filter((b): b is Anthropic.TextBlock => b.type === "text")
-          .map((b) => b.text)
-          .join("\n"),
-      );
+      await pause("Press Enter to reveal the final answer…");
+      step("The model answers");
+      console.log(`${c.green}${c.bold}Answer:${c.reset} ${text}`);
       break;
     }
 
+    round++;
+    const calls = res.content.filter(
+      (b): b is Anthropic.ToolUseBlock => b.type === "tool_use",
+    );
+    for (const call of calls) {
+      console.log(`${c.yellow}↳ round ${round}:${c.reset} ${call.name}(${JSON.stringify(call.input)})`);
+    }
+    await pause(`Press Enter to run round ${round}'s MCP call(s)…`);
+
     const results: Anthropic.ToolResultBlockParam[] = [];
-    for (const block of res.content) {
-      if (block.type !== "tool_use") continue;
-      console.log(`[mcp call] ${block.name}(${JSON.stringify(block.input)})`);
+    for (const call of calls) {
       const r = await mcp.callTool({
-        name: block.name,
-        arguments: block.input as Record<string, unknown>,
+        name: call.name,
+        arguments: call.input as Record<string, unknown>,
       });
-      const text = (r.content as { type: string; text?: string }[])
-        .filter((c) => c.type === "text")
-        .map((c) => c.text)
+      const out = (r.content as { type: string; text?: string }[])
+        .filter((cc) => cc.type === "text")
+        .map((cc) => cc.text)
         .join("\n");
-      results.push({ type: "tool_result", tool_use_id: block.id, content: text });
+      console.log(`  ${c.green}✓${c.reset} ${c.dim}${preview(out)}${c.reset}`);
+      results.push({ type: "tool_result", tool_use_id: call.id, content: out });
     }
     messages.push({ role: "user", content: results });
   }

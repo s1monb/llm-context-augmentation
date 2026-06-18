@@ -3,15 +3,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ask } from "../shared/claude";
 import { QUESTION } from "../shared/knowledge";
+import { c, step, note, pause } from "../shared/ui";
 
 /**
  * Variant 2 — Persistent memory (markdown hierarchy).
- *
- * Knowledge lives in a structured, on-disk markdown tree (memory/) with an
- * index file. Unlike context stuffing's ad-hoc blob, this store *persists*
- * across runs and is human-editable. Here we load the whole hierarchy and
- * inject it; variant 3 keeps the same store but lets the agent fetch only the
- * files it needs.
  */
 const here = path.dirname(fileURLToPath(import.meta.url));
 const MEM = path.join(here, "memory");
@@ -32,23 +27,42 @@ async function readAllMarkdown(
 }
 
 async function main() {
-  console.log(`Q: ${QUESTION}\n`);
+  console.log(`${c.bold}Variant 2 — Persistent memory${c.reset}`);
+  note("Load an on-disk markdown tree, dump it all into the prompt, ask once.");
+  console.log(`\n${c.magenta}Q:${c.reset} ${QUESTION}`);
 
+  // ⏸ Pause before touching the disk so the store can be introduced.
+  await pause("Press Enter to load the markdown memory tree from disk…");
+
+  // STEP 1 — Read the whole persistent store off disk.
+  step("Read the markdown memory tree from disk");
+  note(`Memory store: ${path.relative(process.cwd(), MEM)}/`);
   const files = await readAllMarkdown(MEM);
-  console.log(`Loaded ${files.length} markdown memory files:`);
-  console.log(files.map((f) => `  ${f.rel}`).join("\n") + "\n");
+  console.log(`Loaded ${files.length} markdown files:`);
+  for (const f of files) console.log(`  ${c.green}•${c.reset} ${f.rel}`);
 
-  const context = files
-    .map((f) => `# FILE: ${f.rel}\n${f.text}`)
-    .join("\n\n");
+  // ⏸ Pause so the file list can be talked through before we stuff it.
+  await pause("Press Enter to concatenate every file into the prompt…");
 
+  // STEP 2 — Concatenate every file, verbatim, into a single prompt.
+  step("Concatenate all files into the prompt");
+  note("No retrieval — the entire store goes in, same as context stuffing:");
+  const context = files.map((f) => `# FILE: ${f.rel}\n${f.text}`).join("\n\n");
+  const prompt = `${context}\n\n---\nQuestion: ${QUESTION}`;
+  console.log(`\n${c.dim}--- assembled prompt (${prompt.length} chars) ---${c.reset}`);
+  console.log(`${c.dim}${prompt}${c.reset}`);
+
+  // ⏸ Pause before sending the stuffed prompt to the model.
+  await pause("Press Enter to send the stuffed prompt to the model…");
+
+  // STEP 3 — One LLM call with the entire prompt.
+  step("Single LLM call with the entire prompt");
   const answer = await ask({
     system:
       "You have access to the user's persistent markdown memory. Answer the question using only what's in those files.",
-    prompt: `${context}\n\n---\nQuestion: ${QUESTION}`,
+    prompt,
   });
-  console.log("--- Answer ---");
-  console.log(answer);
+  console.log(`${c.green}${c.bold}Answer:${c.reset} ${answer}`);
 }
 
 main().catch((err) => {

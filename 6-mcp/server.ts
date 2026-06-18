@@ -5,10 +5,6 @@ import { CORPUS } from "../shared/knowledge";
 
 /**
  * A tiny MCP server exposing the Helix knowledge base as tools over stdio.
- *
- * This is the "plumbing" half of MCP: a standard protocol any compatible client
- * can connect to. The client (client.ts) spawns this process, discovers these
- * tools, and lets Claude call them. The server itself knows nothing about Claude.
  */
 const server = new McpServer({ name: "helix-knowledge", version: "1.0.0" });
 
